@@ -1,0 +1,1 @@
+./primeModes --classifierDesc ~/src/detect_faces/resnet50_128_caffe/FP32/resnet50_128.xml --classifierWeights ~/src/detect_faces/resnet50_128_caffe/FP32/resnet50_128.bin --device GPU --nodes 1024 --faces ~/Pictures/faces/ 
