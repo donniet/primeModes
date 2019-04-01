@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"image/jpeg"
 	"log"
@@ -11,7 +13,7 @@ import (
 )
 
 var (
-	facesDirectory    = "."
+	facesDirectory    = ""
 	recurse           = true
 	classifierDesc    = ""
 	classifierWeights = ""
@@ -20,6 +22,8 @@ var (
 	outputFile        = "output.multimodal"
 	inputFile         = ""
 	extension         = ".jpg"
+	extractPeaks      = true
+	embeddingFile     = ""
 )
 
 func init() {
@@ -35,19 +39,21 @@ func init() {
 	flag.StringVar(&inputFile, "input", inputFile, "input modal to start from (blank for none)")
 	flag.StringVar(&inputFile, "i", inputFile, "input modal to start from (blank for none)")
 	flag.StringVar(&extension, "extension", extension, "image extension (only .jpg supported)")
+	flag.BoolVar(&extractPeaks, "peaks", extractPeaks, "extract the peaks from the data structure")
+	flag.StringVar(&embeddingFile, "embeddings", embeddingFile, "read or write the embeddings to this file")
 }
 
-func processImage(path string, classer *detector.Classifier, multiModal *detector.MultiModal) error {
+func processImage(path string, classer *detector.Classifier, multiModal *detector.MultiModal) ([]float32, error) {
 	var rgb *detector.RGB24
 
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 
 	if img, err := jpeg.Decode(f); err != nil {
-		return err
+		return nil, err
 	} else {
 		rgb = detector.FromImage(img)
 	}
@@ -55,16 +61,22 @@ func processImage(path string, classer *detector.Classifier, multiModal *detecto
 	res := classer.InferRGB24(rgb)
 
 	multiModal.Insert(res.Embedding)
-	return nil
+	return res.Embedding, nil
 }
 
 func main() {
 	flag.Parse()
 
-	classer := detector.NewClassifier(classifierDesc, classifierWeights, device)
-	defer classer.Close()
+	var classer *detector.Classifier
+	embeddingSize := 128
 
-	multiModal := detector.NewMultiModal(classer.EmbeddingSize(), maximumNodes)
+	if classifierDesc != "" {
+		classer = detector.NewClassifier(classifierDesc, classifierWeights, device)
+		defer classer.Close()
+		embeddingSize = classer.EmbeddingSize()
+	}
+
+	multiModal := detector.NewMultiModal(embeddingSize, maximumNodes)
 	defer multiModal.Close()
 
 	if inputFile == "" {
@@ -81,14 +93,30 @@ func main() {
 	// go through all files in the directory
 	images := []string{}
 
-	err := filepath.Walk(facesDirectory, func(path string, f os.FileInfo, err error) error {
-		if filepath.Ext(path) == extension {
-			images = append(images, path)
+	if facesDirectory != "" {
+		err := filepath.Walk(facesDirectory, func(path string, f os.FileInfo, err error) error {
+			if filepath.Ext(path) == extension {
+				images = append(images, path)
+			}
+			return nil
+		})
+		if err != nil {
+			log.Fatal(err)
 		}
-		return nil
-	})
-	if err != nil {
-		log.Fatal(err)
+	}
+
+	embeddings := make(map[string][]float32)
+
+	if embeddingFile != "" {
+		f, err := os.Open(embeddingFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := binary.Read(f, binary.LittleEndian, &embeddingFile); err != nil {
+			f.Close()
+			log.Fatal(err)
+		}
+		f.Close()
 	}
 
 	// for each image, calculate the embedding
@@ -97,18 +125,42 @@ func main() {
 			log.Printf("image #%d", i)
 		}
 
-		if err := processImage(p, classer, &multiModal); err != nil {
+		if embedding, err := processImage(p, classer, &multiModal); err != nil {
 			log.Print(err)
+		} else {
+			embeddings[p] = embedding
 		}
 	}
 
-	log.Printf("writing file...")
-	f, err := os.OpenFile(outputFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0660)
-	if err != nil {
-		log.Fatal(err)
+	if embeddingFile != "" {
+		f, err := os.OpenFile(embeddingFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0660)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := binary.Write(f, binary.LittleEndian, embeddings); err != nil {
+			f.Close()
+			log.Fatal(f)
+		}
+		f.Close()
 	}
-	defer f.Close()
-	if _, err := multiModal.WriteTo(f); err != nil {
-		log.Fatal(err)
+
+	if extractPeaks {
+		b, err := json.MarshalIndent(multiModal.Peaks(), "", "  ")
+		if err != nil {
+			log.Fatal(err)
+		}
+		os.Stdout.Write(b)
+	}
+
+	if outputFile != "" {
+		log.Printf("writing file...")
+		f, err := os.OpenFile(outputFile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0660)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := multiModal.WriteTo(f); err != nil {
+			log.Fatal(err)
+		}
 	}
 }
